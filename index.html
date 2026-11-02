@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Smart Gas</title>
+<style>
+  :root{--g:#1B5E20;--gl:#E8F5E9;--cream:#FFF8E1;--ink:#1f2933;--mut:#667085;--line:#d9e2dc;--warn:#b42318;--r:14px}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Noto Sans Thai","Sarabun",sans-serif;background:var(--cream);color:var(--ink);padding-bottom:76px}
+  header{background:var(--g);color:#fff;padding:14px 16px;position:sticky;top:0;z-index:5}
+  header b{font-size:18px}header small{display:block;opacity:.85;margin-top:2px}
+  main{max-width:560px;margin:0 auto;padding:14px}
+  h2{font-size:17px;margin:4px 0 10px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
+  label{display:block;font-size:14px;color:var(--mut);margin:10px 0 4px}
+  input,select,textarea{width:100%;font:inherit;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:#fff}
+  textarea{min-height:76px;resize:vertical}
+  button{font:inherit;border:0;border-radius:12px;padding:12px 16px;cursor:pointer;background:var(--gl);color:var(--g);font-weight:600}
+  button.primary{background:var(--g);color:#fff;width:100%;margin-top:14px}
+  button.danger{background:#fdecea;color:var(--warn)}
+  button[disabled]{opacity:.55;cursor:not-allowed}
+  .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}.row>.fix{flex:0 0 auto}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .chip{padding:6px 12px;border-radius:999px;background:var(--gl);color:var(--g);font-size:14px;cursor:pointer;border:1px solid transparent}
+  .chip.on{background:var(--g);color:#fff}
+  .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:var(--gl);color:var(--g);margin-left:6px}
+  .st-cancelled{background:#f2f4f7;color:#667085}.lv-high{background:#fdecea;color:#b42318}.lv-medium{background:#fff4cc;color:#7a5c00}.lv-normal{background:var(--gl);color:var(--g)}
+  a.btn{display:block;text-align:center;text-decoration:none;border-radius:12px;padding:12px 16px;background:var(--gl);color:var(--g);font-weight:600}
+  .st-waiting{background:#fff4cc;color:#7a5c00}.st-delivering{background:#d9f3ef;color:#0b5d52}.st-done{background:var(--gl);color:var(--g)}
+  .muted{color:var(--mut);font-size:14px}.err{color:var(--warn);font-size:14px;margin-top:8px}
+  .qty{display:flex;align-items:center;gap:8px}.qty input{text-align:center;width:90px}.qty button{width:44px;padding:10px 0}
+  #map{height:240px;border-radius:12px;border:1px solid var(--line);margin:6px 0;background:#eef3ef}
+  nav{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--line);display:flex;padding-bottom:env(safe-area-inset-bottom)}
+  nav button{flex:1;border-radius:0;background:#fff;color:var(--mut);padding:12px 4px;font-size:13px}
+  nav button.on{color:var(--g);border-top:3px solid var(--g)}
+  #toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#1f2933;color:#fff;padding:10px 16px;border-radius:999px;font-size:14px;max-width:90%;display:none;z-index:20}
+  #busy{position:fixed;inset:0;background:rgba(255,255,255,.7);display:none;align-items:center;justify-content:center;z-index:30;font-weight:600;color:var(--g)}
+  .total{font-size:20px;font-weight:700;color:var(--g)}
+</style>
+</head>
+<body>
+<header><b>Smart Gas</b><small>แก๊สหมด สั่งง่าย ส่งถึงบ้าน</small></header>
+<main id="main"></main>
+<nav id="nav" hidden></nav>
+<div id="toast" role="status"></div>
+<div id="busy">กำลังดำเนินการ...</div>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js" charset="utf-8"></script>
+<script src="config.js"></script>
+<script>
+'use strict';
+const CFG = window.APP_CONFIG || {};
+const S = { session: null, role: 'customer', profile: null, needsProfile: false, prices: [], addresses: [], orders: [], page: 'order', prefill: null, ctx: {} };
+const NAMES = { order: 'สั่งแก๊ส', orders: 'สถานะ', addresses: 'ที่อยู่', prices: 'ราคา', staff: 'งานส่ง' };
+const STATUS_TH = { waiting: 'รอจัดส่ง', delivering: 'กำลังจัดส่ง', done: 'จัดส่งแล้ว', cancelled: 'ยกเลิกแล้ว' };
+let staffTimer = null;
+const $ = (s) => document.querySelector(s);
+
+/* ---------- ตัวช่วย DOM (ใช้ textContent เสมอ ไม่ใช้ innerHTML กับข้อมูลผู้ใช้) ---------- */
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (v === true) n.setAttribute(k, '');
+    else n.setAttribute(k, v);
+  }
+  kids.flat().forEach((c) => { if (c != null && c !== false) n.append(c instanceof Node ? c : document.createTextNode(String(c))); });
+  return n;
+}
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => { t.style.display = 'none'; }, 3500); }
+function busy(on) { $('#busy').style.display = on ? 'flex' : 'none'; }
+async function guard(fn) { busy(true); try { return await fn(); } catch (e) { toast(e.message || 'เกิดข้อผิดพลาด'); } finally { busy(false); } }
+const baht = (n) => Number(n).toLocaleString('th-TH') + ' บาท';
+
+/* ---------- API + Login ---------- */
+async function api(action, payload, retry = true) {
+  const res = await fetch(CFG.API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action, token: S.session, payload: payload || {} }) });
+  const j = await res.json();
+  if (!j.ok) {
+    if (j.error.code === 'AUTH_REQUIRED' && retry && action !== 'login') { await doLogin(); return api(action, payload, false); }
+    const e = new Error(j.error.message); e.code = j.error.code; throw e;
+  }
+  return j.data;
+}
+async function doLogin() {
+  const idToken = liff.getIDToken();
+  if (!idToken) { liff.login({ redirectUri: location.href }); throw new Error('กำลังเข้าสู่ระบบ...'); }
+  try {
+    const d = await api('login', { idToken }, false);
+    Object.assign(S, { session: d.sessionToken, role: d.role, profile: d.profile, needsProfile: d.needsProfile });
+  } catch (e) {
+    if (e.code === 'AUTH_FAILED') { liff.logout(); liff.login({ redirectUri: location.href }); }   // ID token หมดอายุ
+    throw e;
+  }
+}
+
+/* ---------- เริ่มต้น ---------- */
+async function boot() {
+  busy(true);
+  try {
+    await liff.init({ liffId: CFG.LIFF_ID });
+    if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
+    await doLogin();
+    const q = new URLSearchParams(location.search).get('page') || 'order';
+    [S.prices, S.addresses] = await Promise.all([api('prices'), api('addresses.list')]);
+    // ร้าน/คนส่งที่เปิดหน้างานส่งโดยตรงไม่ต้องกรอกโปรไฟล์ลูกค้าก่อน
+    await go(S.needsProfile && !(S.role !== 'customer' && q === 'staff') ? 'profile' : q);
+  } catch (e) {
+    $('#main').replaceChildren(el('div', { class: 'card' }, el('b', {}, 'เปิดหน้านี้ไม่สำเร็จ'), el('p', { class: 'muted' }, e.message || String(e))));
+  } finally { busy(false); }
+}
+
+async function go(page, ctx) {
+  clearInterval(staffTimer);
+  S.ctx = ctx || {};
+  if (page === 'reorder') {
+    const t = await api('order.reorder');
+    S.prefill = t.item ? { ...t.item, addressId: t.addressId } : null;
+    page = 'order';
+  }
+  S.page = PAGES[page] ? page : 'order';
+  const nav = $('#nav');
+  nav.hidden = S.page === 'profile';
+  nav.replaceChildren(...Object.keys(NAMES).filter((k) => k !== 'staff' || S.role !== 'customer').map((k) => el('button', { class: k === S.page ? 'on' : '', onclick: () => guard(() => go(k)) }, NAMES[k])));
+  $('#main').replaceChildren(await PAGES[S.page]());
+  if (!S.ctx.keepScroll) scrollTo(0, 0);
+}
+
+/* ---------- หน้า: โปรไฟล์ครั้งแรก ---------- */
+const PAGES = {};
+PAGES.profile = async () => {
+  const p = S.profile || {};
+  const name = el('input', { value: p.fullName || '', autocomplete: 'name', maxlength: 80 });
+  const phone = el('input', { value: p.phone || '', type: 'tel', inputmode: 'tel', autocomplete: 'tel', placeholder: '0812345678' });
+  const type = el('select', {}, ['Household', 'Restaurant', 'Business'].map((t) => el('option', { value: t, selected: t === (p.customerType || 'Household') }, { Household: 'ครัวเรือน', Restaurant: 'ร้านอาหาร', Business: 'ธุรกิจอื่น' }[t])));
+  const consent = el('input', { type: 'checkbox', style: 'width:auto;margin-right:8px' });
+  return el('div', {},
+    el('h2', {}, 'ข้อมูลของคุณ'),
+    el('div', { class: 'card' },
+      el('p', { class: 'muted' }, 'กรอกครั้งเดียว ครั้งต่อไปสั่งได้ทันที'),
+      el('label', {}, 'ชื่อ-นามสกุล'), name,
+      el('label', {}, 'เบอร์โทรศัพท์'), phone,
+      el('label', {}, 'ประเภทลูกค้า'), type,
+      // TODO: แก้ข้อความ/ใส่ลิงก์นโยบายของร้านจริง และเปลี่ยน CONSENT_VERSION ใน Config.gs เมื่อแก้ข้อความ
+      el('label', { style: 'display:flex;align-items:flex-start;color:var(--ink)' }, consent,
+        el('span', {}, 'ฉันยินยอมให้ร้านเก็บและใช้ชื่อ เบอร์โทร ที่อยู่ และพิกัดจัดส่ง เพื่อรับและส่งแก๊สเท่านั้น [ใส่ลิงก์นโยบายความเป็นส่วนตัวของร้าน]')),
+      el('button', { class: 'primary', onclick: () => guard(async () => {
+        if (!consent.checked) throw new Error('กรุณายอมรับนโยบายข้อมูลส่วนบุคคล');
+        S.profile = await api('profile.save', { fullName: name.value, phone: phone.value, customerType: type.value, consent: true });
+        S.needsProfile = false;
+        toast('บันทึกแล้ว');
+        await go('order');
+      }) }, 'บันทึกและเริ่มใช้งาน')));
+};
+
+/* ---------- หน้า: ราคา ---------- */
+PAGES.prices = async () => {
+  S.prices = await api('prices');
+  const brands = [...new Set(S.prices.map((x) => x.brand))];
+  return el('div', {}, el('h2', {}, 'ราคาแก๊ส'),
+    brands.length ? brands.map((b) => el('div', { class: 'card' }, el('b', {}, b),
+      S.prices.filter((x) => x.brand === b).map((x) => el('div', { class: 'row', style: 'margin-top:8px' }, el('span', {}, x.sizeKg + ' กก.'), el('span', { style: 'text-align:right' }, baht(x.price)))))) : el('p', { class: 'muted' }, 'ร้านยังไม่ได้ตั้งราคา'));
+};
+
+/* ---------- หน้า: ที่อยู่ ---------- */
+PAGES.addresses = async () => {
+  S.addresses = await api('addresses.list');
+  if (S.ctx.add) return addressEditor(null);
+  const target = S.ctx.edit && S.addresses.find((x) => x.addressId === S.ctx.edit);
+  if (target) return addressEditor(target);
+  return el('div', {}, el('h2', {}, 'ที่อยู่ของฉัน'),
+    S.addresses.length ? S.addresses.map((a) => el('div', { class: 'card' },
+      el('b', {}, a.label), a.isDefault ? el('span', { class: 'badge' }, 'ค่าเริ่มต้น') : null,
+      el('p', {}, a.addressDetail), a.note ? el('p', { class: 'muted' }, 'ฝากถึงคนส่ง: ' + a.note) : null,
+      el('div', { class: 'row' },
+        el('button', { onclick: () => guard(() => go('addresses', { edit: a.addressId })) }, 'แก้ไข'),
+        a.isDefault ? null : el('button', { onclick: () => guard(async () => { S.addresses = await api('addresses.setDefault', { addressId: a.addressId }); await go('addresses'); }) }, 'ตั้งเป็นค่าเริ่มต้น'),
+        el('button', { class: 'danger', onclick: () => guard(async () => { if (!confirm('ลบที่อยู่ "' + a.label + '" ?')) return; S.addresses = await api('addresses.delete', { addressId: a.addressId }); await go('addresses'); }) }, 'ลบ')))) : el('p', { class: 'muted' }, 'ยังไม่มีที่อยู่ที่บันทึกไว้'),
+    el('button', { class: 'primary', onclick: () => guard(() => go('addresses', { add: true })) }, '+ เพิ่มที่อยู่ใหม่'));
+};
+let _mapsP = null;
+function loadMaps() {
+  if (window.google && google.maps) return Promise.resolve();
+  if (!CFG.MAPS_API_KEY) return Promise.reject(new Error('no maps key'));
+  return (_mapsP = _mapsP || new Promise((resolve, reject) => {
+    window.__mapsReady = resolve;
+    const s = el('script', { src: 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(CFG.MAPS_API_KEY) + '&callback=__mapsReady&loading=async', async: true });
+    s.onerror = () => reject(new Error('maps load failed'));
+    document.head.append(s);
+  }));
+}
+
+function addressEditor(a) {
+  a = a || { label: '', recipientName: '', phone: '', addressDetail: '', note: '', lat: '', lng: '', isDefault: !S.addresses.length };
+  const f = {
+    label: el('input', { value: a.label, maxlength: 30, placeholder: 'เช่น บ้าน ร้าน ที่ทำงาน' }),
+    recipientName: el('input', { value: a.recipientName, maxlength: 60, placeholder: 'ถ้าไม่ใช่ตัวคุณเอง' }),
+    phone: el('input', { value: a.phone, type: 'tel', inputmode: 'tel', placeholder: 'เบอร์ผู้รับ (ไม่บังคับ)' }),
+    addressDetail: el('textarea', { maxlength: 300, placeholder: 'บ้านเลขที่ ซอย ถนน แขวง/ตำบล เขต/อำเภอ' }, a.addressDetail),
+    note: el('textarea', { maxlength: 200, placeholder: 'เช่น ชั้น 3 ห้อง 302 วางถังไว้หน้าบ้าน' }, a.note),
+    lat: el('input', { value: a.lat, inputmode: 'decimal', placeholder: 'ละติจูด' }),
+    lng: el('input', { value: a.lng, inputmode: 'decimal', placeholder: 'ลองจิจูด' }),
+    isDefault: el('input', { type: 'checkbox', style: 'width:auto;margin-right:8px', checked: !!a.isDefault })
+  };
+  const mapBox = el('div', { id: 'map' });
+  let map, marker;
+  const place = (lat, lng, pan) => {
+    f.lat.value = Number(lat).toFixed(6); f.lng.value = Number(lng).toFixed(6);
+    if (!map) return;
+    const pos = { lat: Number(lat), lng: Number(lng) };
+    if (marker) marker.setPosition(pos);
+    else {
+      // ถ้า Google เลิกรองรับ google.maps.Marker ให้เปลี่ยนเป็น AdvancedMarkerElement (ต้องมี mapId)
+      marker = new google.maps.Marker({ position: pos, map, draggable: true });
+      marker.addListener('dragend', () => { const p = marker.getPosition(); place(p.lat(), p.lng(), false); });
+    }
+    if (pan) map.panTo(pos);
+  };
+  loadMaps().then(() => {
+    const c = Number(a.lat) ? { lat: Number(a.lat), lng: Number(a.lng) } : (CFG.DEFAULT_CENTER || { lat: 13.7563, lng: 100.5018 });
+    map = new google.maps.Map(mapBox, { center: c, zoom: Number(a.lat) ? 17 : 13, streetViewControl: false, mapTypeControl: false });
+    map.addListener('click', (ev) => place(ev.latLng.lat(), ev.latLng.lng(), false));
+    if (Number(a.lat)) place(a.lat, a.lng, false);
+  }).catch(() => { mapBox.replaceChildren(el('p', { class: 'muted', style: 'padding:12px' }, 'แสดงแผนที่ไม่ได้ กรุณาใช้ปุ่ม "ใช้ตำแหน่งปัจจุบัน" หรือกรอกละติจูด/ลองจิจูดเอง')); });
+
+  const useHere = () => {
+    if (!navigator.geolocation) return toast('อุปกรณ์นี้ไม่รองรับการระบุตำแหน่ง');
+    busy(true);
+    navigator.geolocation.getCurrentPosition(
+      (p) => { busy(false); place(p.coords.latitude, p.coords.longitude, true); },
+      (err) => { busy(false); toast(err.code === 1 ? 'คุณไม่อนุญาตการเข้าถึงตำแหน่ง ปักหมุดบนแผนที่แทนได้' : err.code === 3 ? 'ระบุตำแหน่งนานเกินไป ลองอีกครั้ง' : 'หาตำแหน่งไม่พบ'); },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 });
+  };
+  const chips = ['บ้าน', 'ร้าน', 'ที่ทำงาน'].map((t) => el('span', { class: 'chip', onclick: () => { f.label.value = t; } }, t));
+
+  return el('div', {}, el('h2', {}, a.addressId ? 'แก้ไขที่อยู่' : 'เพิ่มที่อยู่ใหม่'),
+    el('div', { class: 'card' },
+      el('label', {}, 'ชื่อเรียก'), el('div', { class: 'chips' }, chips), f.label,
+      el('label', {}, 'ผู้รับแก๊ส'), f.recipientName, f.phone,
+      el('label', {}, 'รายละเอียดที่อยู่'), f.addressDetail,
+      el('label', {}, 'ตำแหน่งจัดส่ง (แตะแผนที่หรือลากหมุด)'),
+      el('button', { onclick: useHere }, 'ใช้ตำแหน่งปัจจุบัน'), mapBox,
+      el('div', { class: 'row' }, f.lat, f.lng),
+      el('label', {}, 'ฝากข้อความถึงคนส่ง'), f.note,
+      el('label', { style: 'display:flex;align-items:center;color:var(--ink)' }, f.isDefault, 'ใช้เป็นที่อยู่เริ่มต้น'),
+      el('button', { class: 'primary', onclick: () => guard(async () => {
+        const payload = { addressId: a.addressId, label: f.label.value, recipientName: f.recipientName.value, phone: f.phone.value,
+          addressDetail: f.addressDetail.value, note: f.note.value, lat: f.lat.value, lng: f.lng.value, isDefault: f.isDefault.checked };
+        S.addresses = await api('addresses.save', payload);
+        toast('บันทึกที่อยู่แล้ว');
+        await go(S.ctx.returnTo || 'addresses');
+      }) }, 'บันทึกที่อยู่'),
+      el('button', { style: 'width:100%;margin-top:8px', onclick: () => guard(() => go(S.ctx.returnTo || 'addresses')) }, 'ยกเลิก')));
+}
+
+/* ---------- หน้า: สั่งแก๊ส ---------- */
+PAGES.order = async () => {
+  const brands = [...new Set(S.prices.map((x) => x.brand))];
+  if (!brands.length) return el('div', { class: 'card' }, 'ร้านยังไม่เปิดรายการสินค้า กรุณาติดต่อร้าน' + (CFG.SHOP_PHONE ? ' โทร ' + CFG.SHOP_PHONE : ''));
+  const pf = S.prefill && S.prices.find((x) => x.brand === S.prefill.brand && x.sizeKg === S.prefill.sizeKg) ? S.prefill : null;
+  S.prefill = null;
+  const requestId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+
+  const brand = el('select', {}, brands.map((b) => el('option', { value: b, selected: pf && pf.brand === b }, b)));
+  const size = el('select');
+  const qty = el('input', { type: 'number', inputmode: 'numeric', min: 1, max: 999, value: pf ? pf.quantity : 1 });
+  const total = el('div', { class: 'total' });
+  const sizes = () => S.prices.filter((x) => x.brand === brand.value);
+  const fillSizes = (want) => size.replaceChildren(...sizes().map((x) => el('option', { value: x.sizeKg, selected: want === x.sizeKg }, x.sizeKg + ' กก. - ' + baht(x.price))));
+  const calc = () => {
+    const item = sizes().find((x) => String(x.sizeKg) === size.value);
+    const q = Math.max(1, Math.min(999, Math.floor(Number(qty.value) || 1)));
+    total.textContent = item ? baht(item.price * q) : '-';
+  };
+  fillSizes(pf && pf.sizeKg); calc();
+  brand.addEventListener('change', () => { fillSizes(); calc(); });
+  size.addEventListener('change', calc); qty.addEventListener('input', calc);
+
+  const addrSel = el('select', {}, S.addresses.map((x) => el('option', { value: x.addressId, selected: pf && pf.addressId ? pf.addressId === x.addressId : x.isDefault }, x.label + ' - ' + x.addressDetail.slice(0, 40))));
+  const addrBlock = S.addresses.length ? [addrSel, el('p', { class: 'muted' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); guard(() => go('addresses')); } }, 'จัดการที่อยู่'))]
+    : [el('p', { class: 'muted' }, 'ยังไม่มีที่อยู่ที่บันทึกไว้'), el('button', { onclick: () => guard(() => go('addresses', { add: true, returnTo: 'order' })) }, '+ เพิ่มที่อยู่จัดส่ง')];
+
+  const submit = el('button', { class: 'primary', disabled: !S.addresses.length, onclick: () => guard(async () => {
+    submit.disabled = true;
+    try {
+      const r = await api('order.place', { brand: brand.value, sizeKg: Number(size.value), quantity: Math.floor(Number(qty.value)), addressId: addrSel.value, clientRequestId: requestId });
+      const no = r.orderId;
+      $('#main').replaceChildren(el('div', { class: 'card' }, el('h2', {}, 'รับคำสั่งซื้อแล้ว'), no ? el('p', {}, 'เลขที่คำสั่งซื้อ ' + no) : null,
+        el('p', { class: 'muted' }, 'ร้านจะแจ้งใน LINE เมื่อกำลังไปส่งและเมื่อส่งสำเร็จ'),
+        el('button', { class: 'primary', onclick: () => guard(() => go('orders')) }, 'ดูสถานะคำสั่งซื้อ')));
+    } catch (e) { submit.disabled = false; throw e; }
+  }) }, 'ยืนยันคำสั่งซื้อ');
+
+  return el('div', {}, el('h2', {}, 'สั่งแก๊ส'),
+    el('div', { class: 'card' },
+      el('label', {}, '1. ยี่ห้อ'), brand, el('label', {}, '2. ขนาดถัง'), size,
+      el('label', {}, '3. จำนวน (ถัง)'),
+      el('div', { class: 'qty' }, el('button', { onclick: () => { qty.value = Math.max(1, (Number(qty.value) || 1) - 1); calc(); } }, '-'), qty,
+        el('button', { onclick: () => { qty.value = Math.min(999, (Number(qty.value) || 0) + 1); calc(); } }, '+')),
+      el('label', {}, '4. ส่งที่'), addrBlock),
+    el('div', { class: 'card' }, el('div', { class: 'row' }, el('span', {}, 'ยอดสินค้า'), el('span', { style: 'text-align:right' }, total)),
+      el('p', { class: 'muted' }, 'ยอดที่แสดงเป็นการประมาณ ระบบหลังบ้านคำนวณจากราคาร้านอีกครั้งตอนยืนยัน')),
+    submit);
+};
+
+/* ---------- หน้า: สถานะ/ประวัติ ---------- */
+PAGES.orders = async () => {
+  S.orders = await api('orders.mine');
+  return el('div', {}, el('h2', {}, 'คำสั่งซื้อของฉัน'),
+    S.orders.length ? S.orders.map((o) => el('div', { class: 'card' },
+      el('div', { class: 'row' }, el('b', {}, '#' + o.orderId), el('span', { style: 'text-align:right' }, el('span', { class: 'badge st-' + o.status }, STATUS_TH[o.status] || o.status))),
+      el('p', {}, o.quantity + ' ถัง ' + o.brand + ' ' + o.sizeKg + ' กก.' + (o.total ? ' - ' + baht(o.total) : '')),
+      el('p', { class: 'muted' }, o.address),
+      el('div', { class: 'row' },
+        o.status === 'cancelled' ? null : el('button', { onclick: () => guard(async () => { S.prefill = { brand: o.brand, sizeKg: o.sizeKg, quantity: o.quantity }; await go('order'); }) }, 'สั่งซ้ำ'),
+        o.status === 'waiting' ? el('button', { class: 'danger', onclick: () => guard(async () => { if (!confirm('ยกเลิกคำสั่งซื้อ #' + o.orderId + ' ?')) return; await api('order.cancel', { orderId: o.orderId }); toast('ยกเลิกแล้ว'); await go('orders'); }) }, 'ยกเลิก') : null))) : el('p', { class: 'muted' }, 'ยังไม่มีคำสั่งซื้อ'));
+};
+
+/* ---------- หน้า: งานส่ง (ร้าน/คนส่ง) ---------- */
+PAGES.staff = async () => {
+  if (S.role === 'customer') return el('div', { class: 'card' }, 'หน้านี้สำหรับร้านและคนส่งเท่านั้น');
+  const d = await api('staff.orders');
+  const LV = { high: 'เร่งด่วนมาก', medium: 'เร่งด่วน', normal: 'ปกติ' };
+  const act = (fn) => () => guard(async () => { await fn(); await go('staff', { keepScroll: true }); });
+  const safeMap = (u) => (typeof u === 'string' && u.startsWith('https://www.google.com/maps/') ? u : null);
+  const card = (o, kind) => {
+    const pr = o.priority;
+    const head = el('div', { class: 'row' }, el('b', {}, '#' + o.orderId),
+      el('span', { style: 'text-align:right' },
+        kind === 'waiting' ? [el('span', { class: 'badge' }, 'ลำดับ ' + pr.rank), el('span', { class: 'badge lv-' + pr.level }, LV[pr.level])]
+          : el('span', { class: 'badge st-' + o.status }, STATUS_TH[o.status])));
+    const nav = safeMap(o.navigateUrl) ? el('a', { class: 'btn', href: o.navigateUrl, target: '_blank', rel: 'noopener' }, 'นำทาง') : null;
+    return el('div', { class: 'card' }, head,
+      el('p', {}, o.quantity + ' ถัง ' + o.brand + ' ' + o.sizeKg + ' กก. - ' + baht(o.total)),
+      el('p', {}, o.customerName + ' ', o.phone ? el('a', { href: 'tel:' + o.phone }, o.phone) : null),
+      el('p', { class: 'muted' }, o.address), o.deliveryNote ? el('p', { class: 'muted' }, 'ฝากถึงคนส่ง: ' + o.deliveryNote) : null,
+      kind === 'waiting' ? el('p', { class: 'muted' }, pr.reason + (pr.travelMin != null ? ' · เดินทางประมาณ ' + pr.travelMin + ' นาที' : '')) : null,
+      kind === 'done' ? null : el('div', { class: 'row' }, nav,
+        kind === 'waiting' ? el('button', { class: 'primary', style: 'margin-top:0', onclick: act(() => api('staff.start', { orderId: o.orderId })) }, 'เริ่มจัดส่ง')
+          : el('button', { class: 'primary', style: 'margin-top:0', onclick: act(() => api('staff.complete', { orderId: o.orderId })) }, 'จัดส่งสำเร็จ')),
+      kind !== 'done' && S.role === 'admin' ? el('button', { class: 'danger', style: 'width:100%;margin-top:8px', onclick: act(async () => { if (!confirm('ยกเลิกคำสั่งซื้อ #' + o.orderId + ' ?')) throw new Error('ไม่ได้ยกเลิก'); await api('staff.cancel', { orderId: o.orderId }); }) }, 'ยกเลิกคำสั่งซื้อ') : null);
+  };
+  const section = (title, list, kind) => el('div', {}, el('h2', {}, title, el('span', { class: 'badge' }, list.length)),
+    list.length ? list.map((o) => card(o, kind)) : el('p', { class: 'muted' }, 'ไม่มีรายการ'));
+  staffTimer = setInterval(() => { if (S.page === 'staff' && !document.hidden) go('staff', { keepScroll: true }).catch(() => {}); }, 60000);
+  return el('div', {},
+    el('div', { class: 'row' }, el('h2', {}, 'งานส่ง'), el('button', { class: 'fix', onclick: act(async () => {}) }, 'รีเฟรช')),
+    el('p', { class: 'muted' }, 'ลำดับงานรอจัดส่งคำนวณจากเวลารอ (ยิ่งรอนานยิ่งขึ้นก่อน) เวลาเดินทางเป็นการประมาณจากระยะเส้นตรง ไม่ใช่เส้นทางจริง'),
+    section('รอจัดส่ง', d.waiting, 'waiting'), section('กำลังจัดส่ง', d.delivering, 'delivering'), section('จัดส่งแล้ว (ล่าสุด)', d.done, 'done'));
+};
+
+boot();
+</script>
+</body>
+</html>
